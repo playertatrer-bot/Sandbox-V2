@@ -1,5 +1,6 @@
 -- Murder Mystery 2 Hub (place 142823291, measured on PlaceVersion 1462)
--- Delta compatible. Rerun to reload. Settings carry over between reloads.
+-- Delta compatible. Rerun to reload. Settings are saved to MM2Hub/settings.json in the executor's
+-- workspace folder (when the executor supports writefile), so they come back in any server.
 --
 -- Measured on 1462: Remotes.Gameplay.GetCurrentPlayerData (RemoteFunction) returns
 -- {[name] = {Role, Dead, Kills, Coins, DeadTime}}; RoundStart(timer, data); PlayerDataChanged(data);
@@ -9,7 +10,8 @@
 -- GunDrop inside the map; a gun picker-upper keeps Role=Innocent until the server sets Role=Hero;
 -- Gun.Shoot is a RemoteEvent (see fireAt); Knife swings via Tool:Activate() then Events.HandleTouched (see stab).
 -- Live-tested: Kill all (5 kills in 0.8s), TP + shoot (killed the murderer from 65 studs),
--- auto grab + auto shoot (gun picked up on drop, murderer killed from 16 studs 0.6s later).
+-- auto grab + auto shoot (gun picked up on drop, murderer killed from 16 studs 0.6s later),
+-- vote spam (+26 votes for one map in one window, stopped when voting closed, alive at round start).
 
 local genv = (getgenv and getgenv()) or _G
 if genv.MM2Hub and genv.MM2Hub.Destroy then pcall(genv.MM2Hub.Destroy) end
@@ -35,10 +37,69 @@ local S = {
 	KnifeAura = false, AuraRange = 15, Capture = false, AutoGrabGun = false,
 	AutoShoot = false, ShootRange = 120, ShootDelay = 1.5, ShotLeadMs = 100,
 	AntiAFK = true,
+	VoteSpam = false, VoteOnMs = 600, VoteMap = "", VoteAutoFav = true,
+	VoteFavs = {},
+	-- map names seen on the vote boards (live or in a recording); new ones are added as they appear
+	KnownMaps = {"Bank 2", "Farmhouse", "Haunted House 2", "House 2", "Mineshaft", "Police Station", "Workplace"},
 }
-if type(genv.MM2Saved) == "table" then
-	for k, v in pairs(genv.MM2Saved) do if S[k] ~= nil and type(S[k]) == type(v) then S[k] = v end end
+
+-- settings persist in the executor's workspace folder, so they survive server changes
+-- (getgenv is wiped when you leave a server); MM2Saved covers reloads in the same server
+local HttpService = game:GetService("HttpService")
+local SAVE_DIR, SAVE_FILE = "MM2Hub", "MM2Hub/settings.json"
+local NOT_SAVED = {Capture = true}
+local canFile = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+
+local function stringList(t)
+	local out, seen = {}, {}
+	for _, v in ipairs(t) do
+		if type(v) == "string" and v ~= "" and not seen[v] then seen[v] = true out[#out + 1] = v end
+	end
+	return out
 end
+
+local function applySaved(t)
+	if type(t) ~= "table" then return end
+	for k, v in pairs(t) do
+		if S[k] ~= nil and type(S[k]) == type(v) and not NOT_SAVED[k] then
+			S[k] = type(v) == "table" and stringList(v) or v
+		end
+	end
+end
+
+local function readSettingsFile()
+	if not canFile then return nil end
+	local ok, data = pcall(function()
+		if not isfile(SAVE_FILE) then return nil end
+		return HttpService:JSONDecode(readfile(SAVE_FILE))
+	end)
+	return ok and data or nil
+end
+
+local lastSavedJson
+local function writeSettingsFile()
+	if not canFile then return false end
+	local copy = {}
+	for k, v in pairs(S) do if not NOT_SAVED[k] then copy[k] = v end end
+	local ok, json = pcall(HttpService.JSONEncode, HttpService, copy)
+	if not ok or json == lastSavedJson then return ok end
+	local wrote = pcall(function()
+		if makefolder and isfolder and not isfolder(SAVE_DIR) then makefolder(SAVE_DIR) end
+		writefile(SAVE_FILE, json)
+	end)
+	if wrote then lastSavedJson = json end
+	return wrote
+end
+
+local knownSeed = table.clone(S.KnownMaps)
+local DEFAULTS = {}
+for k, v in pairs(S) do DEFAULTS[k] = type(v) == "table" and table.clone(v) or v end
+applySaved(readSettingsFile())
+applySaved(genv.MM2Saved)
+for _, name in ipairs(knownSeed) do
+	if not table.find(S.KnownMaps, name) then table.insert(S.KnownMaps, name) end
+end
+table.sort(S.KnownMaps)
 
 -- round state -------------------------------------------------------------------
 
@@ -128,18 +189,21 @@ espFolder.Name = "ESP"
 espFolder.Parent = gui
 
 local C = {
-	bg = Color3.fromRGB(14, 12, 16),
-	panel = Color3.fromRGB(24, 20, 27),
-	row = Color3.fromRGB(33, 28, 37),
-	stroke = Color3.fromRGB(62, 48, 66),
-	text = Color3.fromRGB(240, 235, 242),
-	sub = Color3.fromRGB(160, 145, 168),
-	accent = Color3.fromRGB(230, 40, 70),
-	accent2 = Color3.fromRGB(255, 120, 60),
-	off = Color3.fromRGB(62, 54, 70),
-	go = Color3.fromRGB(220, 40, 70),
-	go2 = Color3.fromRGB(255, 110, 60),
+	bg = Color3.fromRGB(13, 12, 18),
+	bg2 = Color3.fromRGB(24, 17, 28),
+	panel = Color3.fromRGB(21, 19, 29),
+	row = Color3.fromRGB(29, 26, 39),
+	rowOn = Color3.fromRGB(38, 29, 44),
+	stroke = Color3.fromRGB(50, 44, 66),
+	text = Color3.fromRGB(242, 240, 248),
+	sub = Color3.fromRGB(150, 144, 170),
+	accent = Color3.fromRGB(255, 62, 96),
+	accent2 = Color3.fromRGB(255, 140, 64),
+	off = Color3.fromRGB(50, 46, 64),
+	go = Color3.fromRGB(240, 52, 88),
+	go2 = Color3.fromRGB(255, 128, 64),
 }
+local WHITE = Color3.new(1, 1, 1)
 
 local ROLE_COLOR = {
 	Murderer = Color3.fromRGB(255, 45, 60),
@@ -159,10 +223,20 @@ local function new(class, props, kids)
 end
 local function corner(r) return new("UICorner", {CornerRadius = UDim.new(0, r)}) end
 local function stroke(col, th) return new("UIStroke", {Color = col or C.stroke, Thickness = th or 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}) end
-local function tween(o, t, props, style)
-	local tw = TweenService:Create(o, TweenInfo.new(t, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+local function grad(a, b, rot) return new("UIGradient", {Color = ColorSequence.new(a, b), Rotation = rot or 0}) end
+local function tween(o, t, props, style, dir)
+	local tw = TweenService:Create(o, TweenInfo.new(t, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out), props)
 	tw:Play()
 	return tw
+end
+local function isPress(i) return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch end
+
+-- squish on press, spring back on release
+local function pressFx(btn, down)
+	local sc = new("UIScale", {Parent = btn})
+	bind(btn.InputBegan, function(i) if isPress(i) then tween(sc, 0.12, {Scale = down or 0.96}) end end)
+	bind(btn.InputEnded, function(i) if isPress(i) then tween(sc, 0.35, {Scale = 1}, Enum.EasingStyle.Back) end end)
+	return sc
 end
 
 local cam = workspace.CurrentCamera
@@ -172,7 +246,7 @@ uiScale.Parent = gui
 local function makeDrag(handle, target)
 	local dragging, startPos, startInput
 	bind(handle.InputBegan, function(i)
-		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+		if isPress(i) then
 			dragging, startPos, startInput = true, target.Position, i.Position
 			local c
 			c = i.Changed:Connect(function()
@@ -188,106 +262,164 @@ local function makeDrag(handle, target)
 	end)
 end
 
-local main = new("Frame", {
-	Name = "Main", Size = UDim2.fromOffset(400, 290), Position = UDim2.new(0.5, -200, 0.5, -145),
-	BackgroundColor3 = C.bg, BorderSizePixel = 0, ClipsDescendants = true, Parent = gui,
-}, {corner(12), stroke(C.stroke, 1)})
-new("UIGradient", {Color = ColorSequence.new(Color3.fromRGB(24, 16, 22), Color3.fromRGB(12, 10, 14)), Rotation = 90, Parent = main})
+-- window ----------------------------------------------------------------------------
 
-local top = new("Frame", {Size = UDim2.new(1, 0, 0, 38), BackgroundTransparency = 1, Parent = main})
-local dot = new("Frame", {Size = UDim2.fromOffset(8, 8), Position = UDim2.fromOffset(14, 15), BackgroundColor3 = C.accent, Parent = top}, {corner(4)})
-new("UIGradient", {Color = ColorSequence.new(C.accent, C.accent2), Parent = dot})
+local main = new("Frame", {
+	Name = "Main", Size = UDim2.fromOffset(400, 290), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+	BackgroundColor3 = WHITE, BorderSizePixel = 0, ClipsDescendants = true, Parent = gui,
+}, {corner(14), grad(C.bg2, C.bg, 90)})
+local mainScale = new("UIScale", {Parent = main})
+
+-- slowly rotating accent rim
+local edge = new("UIStroke", {Color = WHITE, Thickness = 1.5, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = main})
+local edgeGrad = new("UIGradient", {
+	Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, C.accent), ColorSequenceKeypoint.new(0.3, C.stroke),
+		ColorSequenceKeypoint.new(0.7, C.stroke), ColorSequenceKeypoint.new(1, C.accent2),
+	}),
+	Parent = edge,
+})
+bind(RunService.RenderStepped, function(dt)
+	if main.Visible then edgeGrad.Rotation = (edgeGrad.Rotation + dt * 40) % 360 end
+end)
+
+local top = new("Frame", {Size = UDim2.new(1, 0, 0, 42), BackgroundTransparency = 1, Parent = main})
+local logo = new("Frame", {Size = UDim2.fromOffset(26, 26), Position = UDim2.fromOffset(12, 8), BackgroundColor3 = WHITE, Parent = top}, {corner(8), grad(C.accent, C.accent2, 45)})
+new("TextLabel", {Text = "M", Font = Enum.Font.GothamBlack, TextSize = 15, TextColor3 = WHITE, BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = logo})
 new("TextLabel", {
-	Text = "MM2 Hub", Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = C.text,
-	BackgroundTransparency = 1, Position = UDim2.fromOffset(30, 0), Size = UDim2.new(0, 120, 1, 0),
-	TextXAlignment = Enum.TextXAlignment.Left, Parent = top,
+	Text = "MM2 Hub", Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = WHITE, BackgroundTransparency = 1,
+	Position = UDim2.fromOffset(46, 7), Size = UDim2.fromOffset(140, 16), TextXAlignment = Enum.TextXAlignment.Left, Parent = top,
+}, {grad(C.text, Color3.fromRGB(255, 176, 150), 0)})
+new("TextLabel", {
+	Text = "Murder Mystery 2", Font = Enum.Font.GothamMedium, TextSize = 10, TextColor3 = C.sub, BackgroundTransparency = 1,
+	Position = UDim2.fromOffset(46, 23), Size = UDim2.fromOffset(140, 12), TextXAlignment = Enum.TextXAlignment.Left, Parent = top,
 })
 local roleTag = new("TextLabel", {
-	Text = "Lobby", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.sub,
-	BackgroundColor3 = C.row, Position = UDim2.new(1, -176, 0, 9), Size = UDim2.fromOffset(126, 20), Parent = top,
-}, {corner(10)})
+	Text = "Lobby", Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.sub, BackgroundColor3 = C.row,
+	Position = UDim2.new(1, -178, 0, 11), Size = UDim2.fromOffset(130, 20), TextTruncate = Enum.TextTruncate.AtEnd, Parent = top,
+}, {corner(10), stroke(C.stroke, 1), new("UIPadding", {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8)})})
 local closeBtn = new("TextButton", {
-	Text = "-", Font = Enum.Font.GothamBold, TextSize = 18, TextColor3 = C.sub, AutoButtonColor = false,
-	BackgroundColor3 = C.row, Position = UDim2.new(1, -40, 0, 7), Size = UDim2.fromOffset(26, 24), Parent = top,
-}, {corner(8)})
+	Text = "", AutoButtonColor = false, BackgroundColor3 = C.row,
+	Position = UDim2.new(1, -40, 0, 9), Size = UDim2.fromOffset(28, 24), Parent = top,
+}, {corner(8), stroke(C.stroke, 1)})
+new("Frame", {Size = UDim2.fromOffset(10, 2), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), BackgroundColor3 = C.sub, BorderSizePixel = 0, Parent = closeBtn}, {corner(1)})
+pressFx(closeBtn, 0.9)
 makeDrag(top, main)
-new("Frame", {Size = UDim2.new(1, -24, 0, 1), Position = UDim2.fromOffset(12, 38), BackgroundColor3 = C.stroke, BorderSizePixel = 0, Parent = main})
+new("Frame", {Size = UDim2.new(1, -24, 0, 1), Position = UDim2.fromOffset(12, 42), BackgroundColor3 = C.accent, BorderSizePixel = 0, Parent = main}, {
+	new("UIGradient", {Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(0.5, 0.4), NumberSequenceKeypoint.new(1, 1),
+	})}),
+})
 
+-- tabs ------------------------------------------------------------------------------
+
+local TAB_H, TAB_GAP, TAB_PAD = 30, 5, 6
 local sideBar = new("Frame", {
-	Size = UDim2.new(0, 92, 1, -52), Position = UDim2.fromOffset(10, 46), BackgroundColor3 = C.panel, Parent = main,
-}, {corner(10), new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}), new("UIPadding", {PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)})})
+	Size = UDim2.new(0, 92, 1, -58), Position = UDim2.fromOffset(10, 50), BackgroundColor3 = C.panel, Parent = main,
+}, {corner(10), stroke(C.stroke, 1)})
+-- one highlight that glides to the selected tab
+local tabPill = new("Frame", {
+	Size = UDim2.new(1, -TAB_PAD * 2, 0, TAB_H), Position = UDim2.fromOffset(TAB_PAD, TAB_PAD), BackgroundColor3 = C.row, Parent = sideBar,
+}, {corner(8), stroke(C.stroke, 1)})
+new("Frame", {
+	Size = UDim2.fromOffset(3, 14), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0),
+	BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = tabPill,
+}, {corner(2), grad(C.accent, C.accent2, 90)})
+local tabList = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Parent = sideBar}, {
+	new("UIListLayout", {Padding = UDim.new(0, TAB_GAP), SortOrder = Enum.SortOrder.LayoutOrder}),
+	new("UIPadding", {PaddingTop = UDim.new(0, TAB_PAD), PaddingLeft = UDim.new(0, TAB_PAD), PaddingRight = UDim.new(0, TAB_PAD)}),
+})
 
 local pages = new("Frame", {
-	Size = UDim2.new(1, -120, 1, -52), Position = UDim2.fromOffset(110, 46), BackgroundTransparency = 1, ClipsDescendants = true, Parent = main,
+	Size = UDim2.new(1, -120, 1, -58), Position = UDim2.fromOffset(110, 50), BackgroundTransparency = 1, ClipsDescendants = true, Parent = main,
 })
 
 local tabs, current = {}, nil
 local function selectTab(t)
 	if current == t then return end
+	local prev = current
+	current = t
+	tween(tabPill, 0.35, {Position = UDim2.fromOffset(TAB_PAD, TAB_PAD + (t.order - 1) * (TAB_H + TAB_GAP))})
+	local dir = (prev and prev.order > t.order) and -1 or 1
 	for _, o in pairs(tabs) do
 		local isOn = o == t
-		tween(o.btn, 0.25, {BackgroundTransparency = isOn and 0 or 1, TextColor3 = isOn and C.text or C.sub})
-		tween(o.bar, 0.25, {Size = UDim2.fromOffset(3, isOn and 16 or 0)})
+		tween(o.btn, 0.25, {TextColor3 = isOn and C.text or C.sub})
 		if isOn then
 			o.page.Visible = true
-			o.page.Position = UDim2.fromOffset(0, 14)
+			o.page.Position = UDim2.fromOffset(0, 18 * dir)
 			o.page.GroupTransparency = 1
-			tween(o.page, 0.3, {Position = UDim2.fromOffset(0, 0), GroupTransparency = 0})
+			tween(o.page, 0.35, {Position = UDim2.fromOffset(0, 0), GroupTransparency = 0})
+		elseif o == prev then
+			tween(o.page, 0.15, {GroupTransparency = 1}).Completed:Connect(function()
+				if current ~= o then o.page.Visible = false end
+			end)
 		else
 			o.page.Visible = false
 		end
 	end
-	current = t
 end
 
 local function Tab(name, order)
 	local btn = new("TextButton", {
 		Text = name, Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.sub, AutoButtonColor = false,
-		BackgroundColor3 = C.row, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30), LayoutOrder = order, Parent = sideBar,
-	}, {corner(8)})
-	local bar = new("Frame", {Size = UDim2.fromOffset(3, 0), Position = UDim2.new(0, 0, 0.5, 0), AnchorPoint = Vector2.new(0, 0.5), BackgroundColor3 = C.accent, BorderSizePixel = 0, Parent = btn}, {corner(2)})
+		BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, TAB_H), LayoutOrder = order, Parent = tabList,
+	})
 	local page = new("CanvasGroup", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false, Parent = pages})
 	local scroll = new("ScrollingFrame", {
-		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 2,
-		ScrollBarImageColor3 = C.accent, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = page,
-	}, {new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}), new("UIPadding", {PaddingRight = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6)})})
-	local t = {btn = btn, bar = bar, page = page, list = scroll, n = 0}
+		Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+		ScrollBarImageColor3 = C.accent, ScrollBarImageTransparency = 0.3, ScrollingDirection = Enum.ScrollingDirection.Y,
+		CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Parent = page,
+	}, {
+		new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}),
+		new("UIPadding", {PaddingTop = UDim.new(0, 2), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8)}),
+	})
+	local t = {btn = btn, page = page, list = scroll, n = 0, order = order}
 	tabs[name] = t
 	bind(btn.MouseButton1Click, function() selectTab(t) end)
 	return t
 end
 
+-- controls ------------------------------------------------------------------------
+
 local function Section(tab, text)
 	tab.n = tab.n + 1
+	local f = new("Frame", {BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 20), LayoutOrder = tab.n, Parent = tab.list})
+	new("Frame", {
+		Size = UDim2.fromOffset(3, 10), Position = UDim2.new(0, 2, 0.5, -5), BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = f,
+	}, {corner(2), grad(C.accent, C.accent2, 90)})
 	new("TextLabel", {
-		Text = string.upper(text), Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = C.accent,
-		BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 16), TextXAlignment = Enum.TextXAlignment.Left,
-		LayoutOrder = tab.n, Parent = tab.list,
+		Text = string.upper(text), Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = C.sub, BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(11, 0), Size = UDim2.new(1, -11, 1, 0), TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd, Parent = f,
 	})
 end
 
 local function Label(tab, text, h)
 	tab.n = tab.n + 1
+	local card = new("Frame", {
+		BackgroundColor3 = C.panel, Size = UDim2.new(1, 0, 0, h or 34), LayoutOrder = tab.n, Parent = tab.list,
+	}, {corner(8), stroke(C.stroke, 1)})
+	new("Frame", {
+		Size = UDim2.new(0, 2, 1, -14), Position = UDim2.fromOffset(7, 7), BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = card,
+	}, {corner(1), grad(C.accent, C.accent2, 90)})
 	return new("TextLabel", {
-		Text = text, Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = C.sub, TextWrapped = true,
-		BackgroundColor3 = C.panel, Size = UDim2.new(1, 0, 0, h or 34), TextXAlignment = Enum.TextXAlignment.Left,
-		LayoutOrder = tab.n, Parent = tab.list,
-	}, {corner(8), new("UIPadding", {PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10)})})
+		Text = text, Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = C.sub, TextWrapped = true, BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(17, 0), Size = UDim2.new(1, -25, 1, 0), TextXAlignment = Enum.TextXAlignment.Left, Parent = card,
+	})
 end
 
+-- container buttons (player lists) use a quieter row style than the main action buttons
 local function Button(tab, text, cb, container)
+	local quiet = container ~= nil
 	local b = new("TextButton", {
-		Text = text, Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.text, AutoButtonColor = false,
-		BackgroundColor3 = C.go, Size = UDim2.new(1, 0, 0, 34), Parent = container or tab.list,
+		Text = text, Font = quiet and Enum.Font.GothamMedium or Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.text,
+		AutoButtonColor = false, BackgroundColor3 = quiet and C.row or WHITE, Size = UDim2.new(1, 0, 0, 34),
+		TextTruncate = Enum.TextTruncate.AtEnd, Parent = container or tab.list,
 	}, {corner(8)})
+	if quiet then stroke(C.stroke, 1).Parent = b else grad(C.go, C.go2, 0).Parent = b end
 	if not container then tab.n = tab.n + 1 b.LayoutOrder = tab.n end
-	new("UIGradient", {Color = ColorSequence.new(C.go, C.go2), Rotation = 0, Parent = b})
-	local sc = new("UIScale", {Parent = b})
-	bind(b.MouseButton1Click, function()
-		sc.Scale = 0.94
-		tween(sc, 0.25, {Scale = 1}, Enum.EasingStyle.Back)
-		task.spawn(cb)
-	end)
+	pressFx(b)
+	bind(b.MouseButton1Click, function() task.spawn(cb) end)
 	return b
 end
 
@@ -302,17 +434,23 @@ local function Toggle(tab, text, key, cb)
 	local row = new("TextButton", {
 		Text = "", AutoButtonColor = false, BackgroundColor3 = C.row, Size = UDim2.new(1, 0, 0, 34), LayoutOrder = tab.n, Parent = tab.list,
 	}, {corner(8)})
+	local rim = stroke(C.accent, 1) rim.Transparency = 1 rim.Parent = row
+	pressFx(row, 0.97)
 	new("TextLabel", {
 		Text = text, Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.text, BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -60, 1, 0), TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+		Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -64, 1, 0), TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
 	})
-	local sw = new("Frame", {Size = UDim2.fromOffset(36, 18), Position = UDim2.new(1, -46, 0.5, -9), BackgroundColor3 = C.off, Parent = row}, {corner(9)})
-	local knob = new("Frame", {Size = UDim2.fromOffset(14, 14), Position = UDim2.fromOffset(2, 2), BackgroundColor3 = C.text, Parent = sw}, {corner(7)})
+	local sw = new("Frame", {Size = UDim2.fromOffset(38, 20), Position = UDim2.new(1, -48, 0.5, -10), BackgroundColor3 = C.off, Parent = row}, {corner(10)})
+	local swOn = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = WHITE, BackgroundTransparency = 1, Parent = sw}, {corner(10), grad(C.accent, C.accent2, 0)})
+	local knob = new("Frame", {Size = UDim2.fromOffset(16, 16), Position = UDim2.fromOffset(2, 2), BackgroundColor3 = C.text, Parent = sw}, {corner(8)})
 	local function render(anim)
 		local isOn = S[key]
-		local t = anim and 0.25 or 0
-		tween(sw, t, {BackgroundColor3 = isOn and C.accent or C.off})
-		tween(knob, t, {Position = UDim2.fromOffset(isOn and 20 or 2, 2)}, Enum.EasingStyle.Back)
+		local t = anim and 0.3 or 0
+		tween(swOn, t, {BackgroundTransparency = isOn and 0 or 1})
+		tween(knob, t, {Position = UDim2.fromOffset(isOn and 20 or 2, 2)})
+		tween(rim, t, {Transparency = isOn and 0.55 or 1})
+		tween(row, t, {BackgroundColor3 = isOn and C.rowOn or C.row})
 	end
 	render(false)
 	toggleRenders[key] = toggleRenders[key] or {}
@@ -326,24 +464,26 @@ end
 
 local function Slider(tab, text, key, min, max, step, fmt, cb)
 	tab.n = tab.n + 1
-	local row = new("Frame", {BackgroundColor3 = C.row, Size = UDim2.new(1, 0, 0, 46), LayoutOrder = tab.n, Parent = tab.list}, {corner(8)})
+	local row = new("Frame", {BackgroundColor3 = C.row, Size = UDim2.new(1, 0, 0, 48), LayoutOrder = tab.n, Parent = tab.list}, {corner(8)})
 	new("TextLabel", {
 		Text = text, Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.text, BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(10, 4), Size = UDim2.new(1, -80, 0, 18), TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+		Position = UDim2.fromOffset(12, 6), Size = UDim2.new(1, -84, 0, 16), TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
 	})
 	local val = new("TextLabel", {
-		Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.accent2, BackgroundTransparency = 1,
-		Position = UDim2.new(1, -70, 0, 4), Size = UDim2.fromOffset(60, 18), TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
-	})
-	local trackF = new("Frame", {Size = UDim2.new(1, -20, 0, 6), Position = UDim2.fromOffset(10, 30), BackgroundColor3 = C.off, Parent = row}, {corner(3)})
-	local fill = new("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = C.accent, BorderSizePixel = 0, Parent = trackF}, {corner(3)})
-	new("UIGradient", {Color = ColorSequence.new(C.accent, C.accent2), Parent = fill})
-	local knob = new("Frame", {Size = UDim2.fromOffset(12, 12), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), BackgroundColor3 = C.text, Parent = trackF}, {corner(6)})
+		Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = C.text, BackgroundColor3 = C.panel,
+		Position = UDim2.new(1, -62, 0, 5), Size = UDim2.fromOffset(52, 18), Parent = row,
+	}, {corner(6), stroke(C.stroke, 1)})
+	local trackF = new("Frame", {Size = UDim2.new(1, -24, 0, 6), Position = UDim2.fromOffset(12, 33), BackgroundColor3 = C.off, Parent = row}, {corner(3)})
+	local fill = new("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = trackF}, {corner(3), grad(C.accent, C.accent2, 0)})
+	local knob = new("Frame", {
+		Size = UDim2.fromOffset(14, 14), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5), BackgroundColor3 = C.text, Parent = trackF,
+	}, {corner(7), stroke(C.accent, 1.5)})
 	local function set(v, anim)
 		v = math.clamp(math.floor((v - min) / step + 0.5) * step + min, min, max)
 		S[key] = v
 		local a = (v - min) / (max - min)
-		local t = anim and 0.12 or 0
+		local t = anim and 0.08 or 0
 		tween(fill, t, {Size = UDim2.fromScale(a, 1)})
 		tween(knob, t, {Position = UDim2.fromScale(a, 0.5)})
 		val.Text = string.format(fmt, v)
@@ -355,66 +495,98 @@ local function Slider(tab, text, key, min, max, step, fmt, cb)
 		local a = math.clamp((x - trackF.AbsolutePosition.X) / trackF.AbsoluteSize.X, 0, 1)
 		set(min + a * (max - min), true)
 	end
-	local hit = new("TextButton", {Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 24), Position = UDim2.fromOffset(0, 22), Parent = row})
+	local hit = new("TextButton", {Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 26), Position = UDim2.fromOffset(0, 23), Parent = row})
 	bind(hit.InputBegan, function(i)
-		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+		if isPress(i) then
 			held = true
 			fromX(i.Position.X)
-			tween(knob, 0.15, {Size = UDim2.fromOffset(16, 16)})
+			tween(knob, 0.15, {Size = UDim2.fromOffset(18, 18)})
 		end
 	end)
 	bind(UIS.InputChanged, function(i)
 		if held and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then fromX(i.Position.X) end
 	end)
 	bind(UIS.InputEnded, function(i)
-		if held and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+		if held and isPress(i) then
 			held = false
-			tween(knob, 0.15, {Size = UDim2.fromOffset(12, 12)})
+			tween(knob, 0.25, {Size = UDim2.fromOffset(14, 14)}, Enum.EasingStyle.Back)
 		end
 	end)
 end
 
+-- toasts slide in from the right, then slide out and collapse
 local toastHolder = new("Frame", {
-	Size = UDim2.fromOffset(250, 220), Position = UDim2.new(1, -260, 1, -230), BackgroundTransparency = 1, Parent = gui,
+	Size = UDim2.fromOffset(260, 240), Position = UDim2.new(1, -270, 1, -250), BackgroundTransparency = 1, Parent = gui,
 }, {new("UIListLayout", {Padding = UDim.new(0, 6), VerticalAlignment = Enum.VerticalAlignment.Bottom, SortOrder = Enum.SortOrder.LayoutOrder})})
+local toastN = 0
 local function toast(msg, col)
-	local f = new("Frame", {Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.panel, BackgroundTransparency = 1, Parent = toastHolder}, {corner(8)})
-	local s = stroke(col or C.accent, 1) s.Transparency = 1 s.Parent = f
-	local l = new("TextLabel", {
-		Text = msg, Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.text, TextTransparency = 1, BackgroundTransparency = 1,
-		TextWrapped = true, Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0), TextXAlignment = Enum.TextXAlignment.Left, Parent = f,
+	toastN += 1
+	local accentCol = col or C.accent
+	local slot = new("Frame", {Size = UDim2.new(1, 0, 0, 36), BackgroundTransparency = 1, LayoutOrder = toastN, Parent = toastHolder})
+	local card = new("Frame", {Size = UDim2.fromScale(1, 1), Position = UDim2.fromScale(1.15, 0), BackgroundColor3 = C.panel, Parent = slot}, {corner(8)})
+	local s = stroke(accentCol, 1) s.Transparency = 0.45 s.Parent = card
+	new("Frame", {Size = UDim2.new(0, 3, 1, -14), Position = UDim2.fromOffset(7, 7), BackgroundColor3 = accentCol, BorderSizePixel = 0, Parent = card}, {corner(2)})
+	new("TextLabel", {
+		Text = msg, Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.text, BackgroundTransparency = 1, TextWrapped = true,
+		Size = UDim2.new(1, -26, 1, 0), Position = UDim2.fromOffset(18, 0), TextXAlignment = Enum.TextXAlignment.Left, Parent = card,
 	})
-	tween(f, 0.3, {BackgroundTransparency = 0}) tween(l, 0.3, {TextTransparency = 0}) tween(s, 0.3, {Transparency = 0.3})
+	tween(card, 0.4, {Position = UDim2.fromScale(0, 0)})
+	local slots = {}
+	for _, c in ipairs(toastHolder:GetChildren()) do if c:IsA("Frame") then slots[#slots + 1] = c end end
+	if #slots > 5 then
+		table.sort(slots, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
+		slots[1]:Destroy()
+	end
 	task.delay(3, function()
-		tween(f, 0.4, {BackgroundTransparency = 1}) tween(l, 0.4, {TextTransparency = 1}) tween(s, 0.4, {Transparency = 1})
-		task.wait(0.45) f:Destroy()
+		if not slot.Parent then return end
+		tween(card, 0.3, {Position = UDim2.fromScale(1.15, 0)}, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+		task.wait(0.3)
+		if not slot.Parent then return end
+		tween(slot, 0.2, {Size = UDim2.new(1, 0, 0, 0)})
+		task.wait(0.22)
+		slot:Destroy()
 	end)
 end
 
+-- floating button shown while the hub is minimised
 local fab = new("TextButton", {
-	Text = "MM2", Font = Enum.Font.GothamBold, TextSize = 13, TextColor3 = C.text, AutoButtonColor = false,
-	BackgroundColor3 = C.accent, Size = UDim2.fromOffset(46, 46), Position = UDim2.new(0, 16, 0.5, -23), Visible = false, Parent = gui,
-}, {corner(23), stroke(C.accent2, 1.5)})
-new("UIGradient", {Color = ColorSequence.new(C.accent, C.accent2), Rotation = 45, Parent = fab})
+	Text = "", AutoButtonColor = false, BackgroundColor3 = WHITE, AnchorPoint = Vector2.new(0.5, 0.5),
+	Size = UDim2.fromOffset(48, 48), Position = UDim2.new(0, 40, 0.5, 0), Visible = false, Parent = gui,
+}, {corner(24)})
+local fabGrad = grad(C.accent, C.accent2, 45) fabGrad.Parent = fab
+local fabRim = stroke(WHITE, 1.5) fabRim.Transparency = 0.6 fabRim.Parent = fab
+new("TextLabel", {Text = "MM2", Font = Enum.Font.GothamBlack, TextSize = 13, TextColor3 = WHITE, BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Parent = fab})
 makeDrag(fab, fab)
+bind(RunService.RenderStepped, function(dt)
+	if fab.Visible then fabGrad.Rotation = (fabGrad.Rotation + dt * 60) % 360 end
+end)
 
 local open = true
 local fullSize = main.Size
+local HEADER_H = 46
 local function setOpen(v)
 	open = v
 	if v then
 		main.Visible = true
-		main.Size = UDim2.fromOffset(fullSize.X.Offset, 0)
-		tween(main, 0.35, {Size = fullSize})
 		fab.Visible = false
+		main.Size = UDim2.fromOffset(fullSize.X.Offset, HEADER_H)
+		mainScale.Scale = 0.92
+		tween(mainScale, 0.4, {Scale = 1}, Enum.EasingStyle.Back)
+		tween(main, 0.45, {Size = fullSize})
 	else
-		tween(main, 0.25, {Size = UDim2.fromOffset(fullSize.X.Offset, 0)}).Completed:Wait()
-		if not open then main.Visible = false fab.Visible = true fab.Size = UDim2.fromOffset(0, 0) tween(fab, 0.3, {Size = UDim2.fromOffset(46, 46)}, Enum.EasingStyle.Back) end
+		tween(mainScale, 0.25, {Scale = 0.94})
+		tween(main, 0.25, {Size = UDim2.fromOffset(fullSize.X.Offset, HEADER_H)}).Completed:Wait()
+		if not open then
+			main.Visible = false
+			fab.Visible = true
+			fab.Size = UDim2.fromOffset(0, 0)
+			tween(fab, 0.4, {Size = UDim2.fromOffset(48, 48)}, Enum.EasingStyle.Back)
+		end
 	end
 end
 local fabMoved
-bind(fab.InputBegan, function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then fabMoved = fab.Position end end)
-bind(fab.MouseButton1Click, function() if fabMoved == fab.Position then setOpen(true) end end)
+bind(fab.InputBegan, function(i) if isPress(i) then fabMoved = fab.Position end end)
+bind(fab.MouseButton1Click, function() if fabMoved == fab.Position then task.spawn(setOpen, true) end end)
 bind(closeBtn.MouseButton1Click, function() task.spawn(setOpen, false) end)
 bind(UIS.InputBegan, function(i, gp) if not gp and i.KeyCode == Enum.KeyCode.RightShift then task.spawn(setOpen, not open) end end)
 
@@ -798,8 +970,11 @@ end
 -- AssemblyLinearVelocity of other players is unreliable on the client (read 3 for a player moving 15),
 -- so speed comes from where the root part actually was ~0.15s ago.
 local posTrack = setmetatable({}, {__mode = "k"})
+local lastTrack = 0
 bind(RunService.Heartbeat, function()
 	local now = os.clock()
+	if now - lastTrack < 0.03 then return end
+	lastTrack = now
 	for _, p in ipairs(Players:GetPlayers()) do
 		local th = p ~= LP and hrpOf(p)
 		if th then
@@ -1177,6 +1352,151 @@ bind(LP.Idled, function()
 	pcall(function() VU:CaptureController() VU:ClickButton2(Vector2.new()) end)
 end)
 
+-- map vote ----------------------------------------------------------------------
+-- Measured on 1462: Lobby.VotePads.VotePadN.Pad has no TouchInterest and no client script or remote handles
+-- votes, so the server counts whoever's character stands on a pad. Votes only count in a short window before
+-- the round (the boards blank out before the teleport), ~0.3s on a pad registers, and the vote follows your
+-- current character between pads, so hopping never stacks. A recording (13 -> 25 votes in 7s, 8 players)
+-- came from resetting and rushing each fresh character onto the pad.
+
+local function votePads()
+	local lobby = workspace:FindFirstChild("Lobby")
+	local vp = lobby and lobby:FindFirstChild("VotePads")
+	if not vp then return {} end
+	local list = {}
+	for _, m in ipairs(vp:GetChildren()) do
+		if m:IsA("Model") and m:FindFirstChild("Pad") then list[#list + 1] = m end
+	end
+	table.sort(list, function(a, b) return a.Name < b.Name end)
+	return list
+end
+
+local function padText(model, labelName)
+	for _, g in ipairs({model:FindFirstChild("MapInfoGui"), model:FindFirstChild("VoteInfoGui")}) do
+		if g then
+			for _, t in ipairs(g:GetDescendants()) do
+				if t:IsA("TextLabel") and t.Name == labelName then return t.Text end
+			end
+		end
+	end
+	return ""
+end
+
+local function votesOn(model) return tonumber(padText(model, "Votes"):match("%d+")) or 0 end
+-- when voting closes the boards' SurfaceGuis are disabled; the MapName text stays, so it can't be used
+local function voteOpen(model)
+	local g = model:FindFirstChild("VoteInfoGui")
+	return g ~= nil and g.Enabled and padText(model, "MapName") ~= ""
+end
+
+local function mapOptions()
+	local out = {}
+	for _, m in ipairs(votePads()) do
+		local name = padText(m, "MapName")
+		if name ~= "" then out[#out + 1] = {model = m, name = name} end
+	end
+	return out
+end
+
+-- remember every map name the boards show, so the favourites list grows over time
+local function learnMaps()
+	local added = false
+	for _, o in ipairs(mapOptions()) do
+		if not table.find(S.KnownMaps, o.name) then table.insert(S.KnownMaps, o.name) added = true end
+	end
+	if added then table.sort(S.KnownMaps) end
+	return added
+end
+
+-- the map you tapped this round wins; otherwise your first favourite that's on the boards
+local function voteTarget()
+	local options = mapOptions()
+	if S.VoteMap ~= "" then
+		for _, o in ipairs(options) do if o.name == S.VoteMap then return o.model, o.name, "picked" end end
+	end
+	if S.VoteAutoFav then
+		for _, fav in ipairs(S.VoteFavs) do
+			for _, o in ipairs(options) do if o.name == fav then return o.model, o.name, "favourite" end end
+		end
+	end
+	return nil
+end
+
+local voteStatus = "off"
+local voteStats = {resets = 0, start = nil, respawnMs = {}, misses = 0, target = nil}
+
+local function voteBlocked(model)
+	if not S.VoteSpam then return "off" end
+	if #votePads() == 0 then return "no vote pads found" end
+	if not model then
+		if S.VoteMap == "" and #S.VoteFavs == 0 then return "tap a map or add favourites" end
+		return "your map isn't on the boards"
+	end
+	if not voteOpen(model) then return "voting is closed" end
+	if inRound(LP) then return "waiting: you're alive in a round" end
+	return nil
+end
+
+local announcedWindow = false
+task.spawn(function()
+	while alive do
+		learnMaps()
+		local model, targetName, why = voteTarget()
+		local blocked = voteBlocked(model)
+		local char = LP.Character
+		local hum, hrp = humOf(LP), hrpOf(LP)
+		if blocked then
+			voteStatus = blocked .. (voteStats.last and (" | last: " .. voteStats.last) or "")
+			if blocked ~= "waiting: you're alive in a round" then
+				voteStats.start, voteStats.misses, voteStats.target = nil, 0, nil
+				announcedWindow = false
+			end
+			task.wait(0.2)
+		elseif not (hum and hrp and hum.Health > 0) then
+			voteStatus = "waiting for respawn"
+			task.wait(0.05)
+		else
+			if voteStats.target ~= targetName then
+				voteStats.target, voteStats.start, voteStats.misses = targetName, nil, 0
+			end
+			if not announcedWindow then
+				announcedWindow = true
+				toast(("Voting open: spamming %s (%s)"):format(targetName, why))
+			end
+			voteStats.start = voteStats.start or votesOn(model)
+			local before = votesOn(model)
+			beginAction()
+			-- hold the fresh character in the middle of the pad until the server counts it
+			local t0 = os.clock()
+			while alive and LP.Character == char and hrp.Parent and os.clock() - t0 < S.VoteOnMs / 1000 and votesOn(model) <= before do
+				hrp.AssemblyLinearVelocity = Vector3.zero
+				hrp.CFrame = CFrame.new(model.Pad.Position)
+				RunService.Heartbeat:Wait()
+			end
+			endAction()
+			if votesOn(model) > before then voteStats.misses = 0 else voteStats.misses += 1 end
+			voteStatus = ("%s: %d votes (+%d, %d resets)"):format(padText(model, "MapName"), votesOn(model), votesOn(model) - voteStats.start, voteStats.resets)
+			voteStats.last = voteStatus
+			-- Reset only while the window is open. A fresh character that isn't counted means voting is over
+			-- (or this character already voted): allow one such reset, then stop so you're alive for the round.
+			-- Without this, a missed close once kept resetting until the round started and you spawned dead.
+			if voteStats.misses >= 2 then voteStatus = voteStatus .. " | not counting, resets paused" end
+			if voteBlocked(model) == nil and LP.Character == char and voteStats.misses < 2 then
+				voteStats.resets += 1
+				pcall(function() hum.Health = 0 end)
+				local t1 = os.clock()
+				while alive and LP.Character == char and os.clock() - t1 < 8 do task.wait(0.03) end
+				local newChar = LP.Character
+				if newChar and newChar ~= char then
+					newChar:WaitForChild("HumanoidRootPart", 3)
+					table.insert(voteStats.respawnMs, math.floor((os.clock() - t1) * 1000))
+					if #voteStats.respawnMs > 20 then table.remove(voteStats.respawnMs, 1) end
+				end
+			end
+		end
+	end
+end)
+
 -- pages -------------------------------------------------------------------------
 
 local tESP = Tab("Visuals", 1)
@@ -1231,12 +1551,6 @@ task.spawn(function()
 end)
 Button(tCombat, "Grab dropped gun", grabGun)
 Toggle(tCombat, "Auto grab dropped gun", "AutoGrabGun")
-Section(tCombat, "Measure weapons")
-Toggle(tCombat, "Capture weapon remotes", "Capture", function(v)
-	if v and not installCapture() then toast("Executor lacks hookmetamethod") setToggle("Capture", false) return end
-	genv.MM2CaptureOn = v
-end)
-Button(tCombat, "Print captured calls", dumpCapture)
 
 local tPlayer = Tab("Player", 4)
 Section(tPlayer, "Movement")
@@ -1281,19 +1595,161 @@ bind(Players.PlayerAdded, rebuildPlayers)
 bind(Players.PlayerRemoving, function() task.defer(rebuildPlayers) end)
 
 local tMisc = Tab("Misc", 6)
+Section(tMisc, "Map vote")
+Toggle(tMisc, "Vote spam (resets you, lobby only)", "VoteSpam")
+local voteLbl = Label(tMisc, "Vote: off", 40)
+
+local refreshVoteUI
+local GREEN = Color3.fromRGB(60, 220, 110)
+
+Section(tMisc, "This round's maps (tap to spam)")
+tMisc.n = tMisc.n + 1
+local optFrame = new("Frame", {
+	BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = tMisc.n, Parent = tMisc.list,
+}, {new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder})})
+local optHint = new("TextLabel", {
+	Text = "No maps on the boards yet", Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = C.sub,
+	BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 20), TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = 0, Parent = optFrame,
+})
+local optRows = {}
+for i = 1, 3 do
+	local row = new("TextButton", {
+		Text = "", AutoButtonColor = false, BackgroundColor3 = C.row, Size = UDim2.new(1, 0, 0, 34), LayoutOrder = i, Visible = false, Parent = optFrame,
+	}, {corner(8)})
+	local st = stroke(C.accent, 1.5) st.Transparency = 1 st.Parent = row
+	pressFx(row, 0.97)
+	local dot = new("Frame", {Size = UDim2.fromOffset(8, 8), Position = UDim2.new(0, 10, 0.5, -4), BackgroundColor3 = C.off, Parent = row}, {corner(4)})
+	local nameL = new("TextLabel", {
+		Text = "", Font = Enum.Font.GothamMedium, TextSize = 12, TextColor3 = C.text, BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(26, 0), Size = UDim2.new(1, -108, 1, 0), TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
+	})
+	local votesL = new("TextLabel", {
+		Text = "", Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = C.accent2, BackgroundTransparency = 1,
+		Position = UDim2.new(1, -82, 0, 0), Size = UDim2.fromOffset(72, 34), TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
+	})
+	local r = {row = row, stroke = st, dot = dot, name = nameL, votes = votesL, map = nil}
+	optRows[i] = r
+	bind(row.MouseButton1Click, function()
+		if not r.map then return end
+		S.VoteMap = (S.VoteMap == r.map) and "" or r.map
+		toast(S.VoteMap ~= "" and ("Vote target: " .. S.VoteMap) or "Pick cleared: using favourites")
+		refreshVoteUI()
+	end)
+end
+
+Section(tMisc, "Favourites (auto-spam, in this order)")
+Toggle(tMisc, "Auto-spam favourites", "VoteAutoFav", function() if refreshVoteUI then refreshVoteUI() end end)
+tMisc.n = tMisc.n + 1
+local favFrame = new("Frame", {
+	BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = tMisc.n, Parent = tMisc.list,
+}, {new("UIGridLayout", {CellSize = UDim2.new(0.5, -3, 0, 28), CellPadding = UDim2.fromOffset(6, 6), SortOrder = Enum.SortOrder.LayoutOrder})})
+local chips, chipCount = {}, 0
+local function rebuildFavChips()
+	for _, c in ipairs(favFrame:GetChildren()) do if c:IsA("GuiObject") then c:Destroy() end end
+	chips, chipCount = {}, #S.KnownMaps
+	for i, name in ipairs(S.KnownMaps) do
+		local b = new("TextButton", {
+			Text = name, Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = C.sub, AutoButtonColor = false,
+			BackgroundColor3 = C.row, LayoutOrder = i, TextTruncate = Enum.TextTruncate.AtEnd, Parent = favFrame,
+		}, {corner(8), new("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)})})
+		chips[name] = b
+		local sc = new("UIScale", {Parent = b})
+		b.InputBegan:Connect(function(i) if isPress(i) then tween(sc, 0.12, {Scale = 0.94}) end end)
+		b.InputEnded:Connect(function(i) if isPress(i) then tween(sc, 0.35, {Scale = 1}, Enum.EasingStyle.Back) end end)
+		b.MouseButton1Click:Connect(function()
+			local idx = table.find(S.VoteFavs, name)
+			if idx then table.remove(S.VoteFavs, idx) else table.insert(S.VoteFavs, name) end
+			refreshVoteUI()
+		end)
+	end
+end
+Button(tMisc, "Clear favourites", function() table.clear(S.VoteFavs) refreshVoteUI() end)
+Slider(tMisc, "Max wait on pad (ms)", "VoteOnMs", 200, 2000, 50, "%d")
+
+refreshVoteUI = function()
+	local options = mapOptions()
+	local _, targetName = voteTarget()
+	optHint.Visible = #options == 0
+	for i = 1, 3 do
+		local r, o = optRows[i], options[i]
+		r.map = o and o.name
+		r.row.Visible = o ~= nil
+		if o then
+			local fav = table.find(S.VoteFavs, o.name)
+			local open = voteOpen(o.model)
+			r.name.Text = o.name .. (fav and ("  (fav " .. fav .. ")") or "")
+			r.name.TextColor3 = (S.VoteMap == o.name) and C.accent2 or C.text
+			r.votes.Text = votesOn(o.model) .. " votes"
+			r.dot.BackgroundColor3 = open and GREEN or C.off
+			r.stroke.Transparency = (o.name == targetName) and 0 or 1
+		end
+	end
+	for name, b in pairs(chips) do
+		local idx = table.find(S.VoteFavs, name)
+		b.Text = idx and (idx .. ". " .. name) or name
+		b.BackgroundColor3 = idx and C.accent or C.row
+		b.TextColor3 = idx and C.text or C.sub
+	end
+end
+rebuildFavChips()
+refreshVoteUI()
+task.spawn(function()
+	while alive do
+		if learnMaps() or chipCount ~= #S.KnownMaps then rebuildFavChips() end
+		refreshVoteUI()
+		voteLbl.Text = "Vote: " .. voteStatus
+		task.wait(0.3)
+	end
+end)
+
 Section(tMisc, "Utility")
 Toggle(tMisc, "Anti AFK", "AntiAFK")
 Button(tMisc, "Refresh roles now", function() refreshData() lastRoleKey = nil announceRoles() end)
+Label(tMisc, canFile and "Settings are saved to a file and come back in any server."
+	or "This executor can't save files: settings last until you leave the server.", 40)
+Button(tMisc, "Reset all settings", function()
+	genv.MM2ResetRequested = true
+	genv.MM2Hub.Destroy()
+end)
 Button(tMisc, "Unload hub", function() genv.MM2Hub.Destroy() end)
 Label(tMisc, "RightShift or the minus button hides the hub.", 34)
+
+Section(tMisc, "Developer")
+Toggle(tMisc, "Capture weapon remotes", "Capture", function(v)
+	if v and not installCapture() then toast("Executor lacks hookmetamethod") setToggle("Capture", false) return end
+	genv.MM2CaptureOn = v
+end)
+Button(tMisc, "Print captured calls", dumpCapture)
 
 selectTab(tESP)
 
 -- teardown -------------------------------------------------------------------
 
+task.spawn(function()
+	while alive do
+		task.wait(2)
+		if alive then writeSettingsFile() end
+	end
+end)
+
 genv.MM2Hub = {
 	Destroy = function()
 		alive = false
+		if genv.MM2ResetRequested then
+			-- "Reset all settings": put every setting back to its default and keep the maps learned so far
+			genv.MM2ResetRequested = nil
+			local known = S.KnownMaps
+			for k, v in pairs(DEFAULTS) do S[k] = type(v) == "table" and table.clone(v) or v end
+			S.KnownMaps = known
+			writeSettingsFile()
+			-- the hub's own toasts die with its GUI, so use Roblox's notification
+			pcall(function()
+				game:GetService("StarterGui"):SetCore("SendNotification", {Title = "MM2 Hub", Text = "Settings reset. Run the hub again.", Duration = 6})
+			end)
+		else
+			writeSettingsFile()
+		end
 		genv.MM2Saved = table.clone(S)
 		genv.MM2CaptureOn = false
 		for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
@@ -1315,6 +1771,8 @@ genv.MM2Hub = {
 		hasLOS = hasLOS, pickSpot = pickSpot, murderer = murdererTarget, tpShoot = tpShootMurderer,
 		grabGun = grabGun, killAll = killAll, status = function() return shootStatus end,
 		busy = function() return busy end, shots = shotHistory, velocity = trackedVelocity,
+		votePads = votePads, votesOn = votesOn, voteOpen = voteOpen, voteStatus = function() return voteStatus end,
+		voteStats = voteStats, voteTarget = voteTarget, mapOptions = mapOptions,
 	},
 }
 
